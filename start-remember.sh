@@ -23,4 +23,7 @@ mkdir -p "$DB_DIR"
 DB_NAME="$(echo "$PROJECT" | sed 's|/|__|g' | sed 's|^__||')"
 DB_PATH="$DB_DIR/${DB_NAME}.db"
 
-exec "$BINARY" --mcp --project "$PROJECT" --db "$DB_PATH"
+# Consolidation interval: configurable via env var (default: 1800s = 30 min)
+CONSOLIDATION_INTERVAL="${CONSOLIDATION_INTERVAL:-1800}"
+
+exec "$BINARY" --mcp --project "$PROJECT" --db "$DB_PATH" --consolidation-interval "$CONSOLIDATION_INTERVAL"

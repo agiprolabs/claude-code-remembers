@@ -108,17 +108,37 @@ async fn main() {
         }
     };
 
-    let state = Arc::new(DaemonState::new(conn, api));
+    // Open global memory DB (shared across all projects)
+    let global_db_path = std::env::var("HOME")
+        .map(std::path::PathBuf::from)
+        .unwrap_or_default()
+        .join(".claude/memory/global.db");
+    let global_db = match rusqlite::Connection::open(&global_db_path) {
+        Ok(gconn) => {
+            if let Err(e) = db::schema::initialize(&gconn) {
+                error!("Failed to initialize global schema: {e}");
+                None
+            } else {
+                info!("Global memory DB opened: {}", global_db_path.display());
+                Some(gconn)
+            }
+        }
+        Err(e) => {
+            info!("Could not open global DB ({e}), global memories disabled");
+            None
+        }
+    };
+
+    let state = Arc::new(DaemonState::new(conn, global_db, api, args.consolidation_interval));
 
     // Spawn consolidation loop
     let consolidation_state = Arc::clone(&state);
-    let consolidation_interval = args.consolidation_interval;
     tokio::spawn(async move {
-        let mut interval =
-            tokio::time::interval(std::time::Duration::from_secs(consolidation_interval));
-
         loop {
-            interval.tick().await;
+            let secs = consolidation_state
+                .consolidation_interval_secs
+                .load(std::sync::atomic::Ordering::Relaxed);
+            tokio::time::sleep(std::time::Duration::from_secs(secs)).await;
 
             // Phase 1: Fetch data (sync, short lock)
             let data = {
@@ -144,6 +164,9 @@ async fn main() {
 
                 consolidation_state.update_last_consolidation();
             }
+
+            // Sync global memories during consolidation
+            consolidation_state.sync_global_memories();
         }
     });
 

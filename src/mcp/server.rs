@@ -120,6 +120,152 @@ fn tool_definitions() -> Value {
                     "type": "object",
                     "properties": {}
                 }
+            },
+            {
+                "name": "memory_session_end",
+                "description": "Call at the end of a session with a summary of what happened. The daemon extracts multiple memories from the summary, capturing things that weren't explicitly remembered during the session.",
+                "inputSchema": {
+                    "type": "object",
+                    "properties": {
+                        "summary": {
+                            "type": "string",
+                            "description": "A summary of what happened in this session — what was built, decided, learned, or changed"
+                        },
+                        "session_id": {
+                            "type": "string",
+                            "description": "Optional session identifier"
+                        }
+                    },
+                    "required": ["summary"]
+                }
+            },
+            {
+                "name": "memory_consolidate",
+                "description": "Manually trigger a memory consolidation pass. Haiku analyzes unconsolidated memories, finds connections, generates insights, merges duplicates, and removes obsolete entries.",
+                "inputSchema": {
+                    "type": "object",
+                    "properties": {}
+                }
+            },
+            {
+                "name": "memory_configure",
+                "description": "Update daemon runtime settings. Currently supports consolidation_interval_secs (how often memories are consolidated, in seconds). Example: 300 = 5 min, 1800 = 30 min, 3600 = 1 hour.",
+                "inputSchema": {
+                    "type": "object",
+                    "properties": {
+                        "consolidation_interval_secs": {
+                            "type": "integer",
+                            "description": "Consolidation loop interval in seconds (e.g. 300 = 5 min, 1800 = 30 min)"
+                        }
+                    }
+                }
+            },
+            {
+                "name": "memory_feedback",
+                "description": "Provide feedback on a recalled memory to adjust its importance. Use after memory_recall when results are helpful (+1) or not useful (-1).",
+                "inputSchema": {
+                    "type": "object",
+                    "properties": {
+                        "memory_id": {
+                            "type": "integer",
+                            "description": "The memory ID (from recall results, e.g. #42)"
+                        },
+                        "helpful": {
+                            "type": "boolean",
+                            "description": "true = boost importance, false = reduce importance"
+                        }
+                    },
+                    "required": ["memory_id", "helpful"]
+                }
+            },
+            {
+                "name": "memory_delete",
+                "description": "Delete a memory by ID. Use when a memory is wrong, outdated, or no longer relevant.",
+                "inputSchema": {
+                    "type": "object",
+                    "properties": {
+                        "memory_id": {
+                            "type": "integer",
+                            "description": "The memory ID to delete"
+                        }
+                    },
+                    "required": ["memory_id"]
+                }
+            },
+            {
+                "name": "memory_list",
+                "description": "List all memories without requiring a search query. Optionally filter by type.",
+                "inputSchema": {
+                    "type": "object",
+                    "properties": {
+                        "limit": {
+                            "type": "integer",
+                            "description": "Max memories to return (default: 50)",
+                            "default": 50
+                        },
+                        "memory_type": {
+                            "type": "string",
+                            "description": "Filter by type: architecture, decision, pattern, gotcha, preference, progress"
+                        }
+                    }
+                }
+            },
+            {
+                "name": "memory_update",
+                "description": "Update the content of an existing memory. Re-generates the summary via Haiku.",
+                "inputSchema": {
+                    "type": "object",
+                    "properties": {
+                        "memory_id": {
+                            "type": "integer",
+                            "description": "The memory ID to update"
+                        },
+                        "content": {
+                            "type": "string",
+                            "description": "The new content for this memory"
+                        }
+                    },
+                    "required": ["memory_id", "content"]
+                }
+            },
+            {
+                "name": "memory_export",
+                "description": "Export all memories as JSON for backup or portability.",
+                "inputSchema": {
+                    "type": "object",
+                    "properties": {}
+                }
+            },
+            {
+                "name": "memory_import",
+                "description": "Import memories from a JSON array. Each item should have a 'content' field. Memories are processed through the full ingest pipeline (Haiku classification, dedup, semantic tags).",
+                "inputSchema": {
+                    "type": "object",
+                    "properties": {
+                        "memories": {
+                            "type": "array",
+                            "description": "Array of memory objects, each with at least a 'content' field",
+                            "items": {
+                                "type": "object",
+                                "properties": {
+                                    "content": {
+                                        "type": "string"
+                                    }
+                                },
+                                "required": ["content"]
+                            }
+                        }
+                    },
+                    "required": ["memories"]
+                }
+            },
+            {
+                "name": "memory_setup",
+                "description": "Generate the CLAUDE.md snippet that enables automatic memory tool usage for any project. Returns the text to add to the top of a project's CLAUDE.md file.",
+                "inputSchema": {
+                    "type": "object",
+                    "properties": {}
+                }
             }
         ]
     })
@@ -206,7 +352,8 @@ async fn handle_mcp_request(
                 "protocolVersion": "2024-11-05",
                 "capabilities": {
                     "tools": {},
-                    "resources": {}
+                    "resources": {},
+                    "prompts": {}
                 },
                 "serverInfo": {
                     "name": "claude-remember",
@@ -242,6 +389,57 @@ async fn handle_mcp_request(
         }
 
         "resources/list" => Ok(resource_definitions()),
+
+        "prompts/list" => Ok(json!({
+            "prompts": [{
+                "name": "memory_init",
+                "description": "Load project memory context at session start"
+            }]
+        })),
+
+        "prompts/get" => {
+            let params = req.params.as_ref().ok_or((
+                -32602,
+                "Missing params".to_string(),
+            ))?;
+            let prompt_name = params
+                .get("name")
+                .and_then(|v| v.as_str())
+                .ok_or((-32602, "Missing prompt name".to_string()))?;
+
+            match prompt_name {
+                "memory_init" => {
+                    let resp = state
+                        .handle_get_context(GetContextParams {
+                            max_tokens: 1500,
+                            session_id: None,
+                        })
+                        .await;
+
+                    match resp {
+                        Response::Ok { data } => {
+                            let context = data
+                                .get("context")
+                                .and_then(|v| v.as_str())
+                                .unwrap_or("No memories recorded yet.");
+
+                            Ok(json!({
+                                "description": "Project memory context",
+                                "messages": [{
+                                    "role": "user",
+                                    "content": {
+                                        "type": "text",
+                                        "text": format!("Here is the project memory context from previous sessions. Use this to understand the project better:\n\n{context}")
+                                    }
+                                }]
+                            }))
+                        }
+                        Response::Error { message } => Err((-32000, message)),
+                    }
+                }
+                _ => Err((-32602, format!("Unknown prompt: {prompt_name}"))),
+            }
+        }
 
         "resources/read" => {
             let params = req.params.as_ref().ok_or((
@@ -423,6 +621,300 @@ async fn handle_tool_call(
                         "text": serde_json::to_string_pretty(&data).unwrap_or_default()
                     }]
                 })),
+                Response::Error { message } => Ok(json!({
+                    "content": [{
+                        "type": "text",
+                        "text": format!("Error: {message}")
+                    }],
+                    "isError": true
+                })),
+            }
+        }
+
+        "memory_session_end" => {
+            let summary = args
+                .get("summary")
+                .and_then(|v| v.as_str())
+                .ok_or((-32602, "Missing 'summary' argument".to_string()))?;
+
+            let session_id = args
+                .get("session_id")
+                .and_then(|v| v.as_str())
+                .map(|s| s.to_string());
+
+            let resp = state
+                .handle_session_end_summary(summary, session_id.as_deref())
+                .await;
+
+            match resp {
+                Response::Ok { data } => {
+                    let count = data
+                        .get("memories_extracted")
+                        .and_then(|v| v.as_u64())
+                        .unwrap_or(0);
+
+                    Ok(json!({
+                        "content": [{
+                            "type": "text",
+                            "text": format!("Session ended. Extracted {count} memories from summary.")
+                        }]
+                    }))
+                }
+                Response::Error { message } => Ok(json!({
+                    "content": [{
+                        "type": "text",
+                        "text": format!("Error processing session end: {message}")
+                    }],
+                    "isError": true
+                })),
+            }
+        }
+
+        "memory_consolidate" => {
+            let resp = state.handle_consolidate().await;
+
+            match resp {
+                Response::Ok { data } => {
+                    let msg = data
+                        .get("message")
+                        .and_then(|v| v.as_str())
+                        .unwrap_or("Consolidation complete");
+
+                    Ok(json!({
+                        "content": [{
+                            "type": "text",
+                            "text": msg
+                        }]
+                    }))
+                }
+                Response::Error { message } => Ok(json!({
+                    "content": [{
+                        "type": "text",
+                        "text": format!("Error: {message}")
+                    }],
+                    "isError": true
+                })),
+            }
+        }
+
+        "memory_configure" => {
+            let interval = args
+                .get("consolidation_interval_secs")
+                .and_then(|v| v.as_u64());
+
+            let resp = state.handle_configure(interval);
+
+            match resp {
+                Response::Ok { data } => Ok(json!({
+                    "content": [{
+                        "type": "text",
+                        "text": format!("Configuration updated: {}", serde_json::to_string_pretty(&data).unwrap_or_default())
+                    }]
+                })),
+                Response::Error { message } => Ok(json!({
+                    "content": [{
+                        "type": "text",
+                        "text": format!("Error: {message}")
+                    }],
+                    "isError": true
+                })),
+            }
+        }
+
+        "memory_feedback" => {
+            let memory_id = args
+                .get("memory_id")
+                .and_then(|v| v.as_i64())
+                .ok_or((-32602, "Missing 'memory_id' argument".to_string()))?;
+
+            let helpful = args
+                .get("helpful")
+                .and_then(|v| v.as_bool())
+                .ok_or((-32602, "Missing 'helpful' argument".to_string()))?;
+
+            let resp = state.handle_feedback(memory_id, helpful);
+
+            match resp {
+                Response::Ok { .. } => {
+                    let direction = if helpful { "boosted" } else { "reduced" };
+                    Ok(json!({
+                        "content": [{
+                            "type": "text",
+                            "text": format!("Memory #{memory_id} importance {direction}.")
+                        }]
+                    }))
+                }
+                Response::Error { message } => Ok(json!({
+                    "content": [{
+                        "type": "text",
+                        "text": format!("Error updating feedback: {message}")
+                    }],
+                    "isError": true
+                })),
+            }
+        }
+
+        "memory_delete" => {
+            let memory_id = args
+                .get("memory_id")
+                .and_then(|v| v.as_i64())
+                .ok_or((-32602, "Missing 'memory_id' argument".to_string()))?;
+
+            let resp = state.handle_delete(memory_id);
+
+            match resp {
+                Response::Ok { .. } => Ok(json!({
+                    "content": [{
+                        "type": "text",
+                        "text": format!("Memory #{memory_id} deleted.")
+                    }]
+                })),
+                Response::Error { message } => Ok(json!({
+                    "content": [{
+                        "type": "text",
+                        "text": format!("Error: {message}")
+                    }],
+                    "isError": true
+                })),
+            }
+        }
+
+        "memory_list" => {
+            let limit = args
+                .get("limit")
+                .and_then(|v| v.as_u64())
+                .unwrap_or(50) as usize;
+
+            let memory_type = args
+                .get("memory_type")
+                .and_then(|v| v.as_str());
+
+            let resp = state.handle_list(limit, memory_type);
+
+            match resp {
+                Response::Ok { data } => {
+                    let text = data
+                        .get("memories")
+                        .and_then(|v| v.as_str())
+                        .unwrap_or("No memories found.");
+                    let count = data.get("count").and_then(|v| v.as_u64()).unwrap_or(0);
+
+                    Ok(json!({
+                        "content": [{
+                            "type": "text",
+                            "text": format!("{count} memories:\n{text}")
+                        }]
+                    }))
+                }
+                Response::Error { message } => Ok(json!({
+                    "content": [{
+                        "type": "text",
+                        "text": format!("Error: {message}")
+                    }],
+                    "isError": true
+                })),
+            }
+        }
+
+        "memory_update" => {
+            let memory_id = args
+                .get("memory_id")
+                .and_then(|v| v.as_i64())
+                .ok_or((-32602, "Missing 'memory_id' argument".to_string()))?;
+
+            let content = args
+                .get("content")
+                .and_then(|v| v.as_str())
+                .ok_or((-32602, "Missing 'content' argument".to_string()))?;
+
+            let resp = state.handle_update(memory_id, content).await;
+
+            match resp {
+                Response::Ok { .. } => Ok(json!({
+                    "content": [{
+                        "type": "text",
+                        "text": format!("Memory #{memory_id} updated.")
+                    }]
+                })),
+                Response::Error { message } => Ok(json!({
+                    "content": [{
+                        "type": "text",
+                        "text": format!("Error: {message}")
+                    }],
+                    "isError": true
+                })),
+            }
+        }
+
+        "memory_export" => {
+            let resp = state.handle_export();
+
+            match resp {
+                Response::Ok { data } => Ok(json!({
+                    "content": [{
+                        "type": "text",
+                        "text": serde_json::to_string_pretty(&data).unwrap_or_default()
+                    }]
+                })),
+                Response::Error { message } => Ok(json!({
+                    "content": [{
+                        "type": "text",
+                        "text": format!("Error: {message}")
+                    }],
+                    "isError": true
+                })),
+            }
+        }
+
+        "memory_import" => {
+            let items = args
+                .get("memories")
+                .and_then(|v| v.as_array())
+                .ok_or((-32602, "Missing 'memories' array argument".to_string()))?;
+
+            let resp = state.handle_import(items).await;
+
+            match resp {
+                Response::Ok { data } => {
+                    let count = data.get("imported").and_then(|v| v.as_u64()).unwrap_or(0);
+                    Ok(json!({
+                        "content": [{
+                            "type": "text",
+                            "text": format!("Imported {count} memories.")
+                        }]
+                    }))
+                }
+                Response::Error { message } => Ok(json!({
+                    "content": [{
+                        "type": "text",
+                        "text": format!("Error: {message}")
+                    }],
+                    "isError": true
+                })),
+            }
+        }
+
+        "memory_setup" => {
+            let resp = state.handle_setup();
+
+            match resp {
+                Response::Ok { data } => {
+                    let snippet = data
+                        .get("snippet")
+                        .and_then(|v| v.as_str())
+                        .unwrap_or("");
+                    let instructions = data
+                        .get("instructions")
+                        .and_then(|v| v.as_str())
+                        .unwrap_or("");
+
+                    Ok(json!({
+                        "content": [{
+                            "type": "text",
+                            "text": format!("{instructions}\n\n```markdown\n{snippet}\n```")
+                        }]
+                    }))
+                }
                 Response::Error { message } => Ok(json!({
                     "content": [{
                         "type": "text",

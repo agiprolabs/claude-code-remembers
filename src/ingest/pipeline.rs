@@ -8,12 +8,14 @@ use crate::ingest::dedup;
 
 #[derive(Debug, Deserialize)]
 pub(crate) struct HaikuExtraction {
-    summary: Option<String>,
-    entities: Option<Vec<String>>,
-    topics: Option<Vec<String>>,
-    memory_type: Option<String>,
-    importance: Option<f64>,
-    is_duplicate_of: Option<String>,
+    pub(crate) summary: Option<String>,
+    pub(crate) entities: Option<Vec<String>>,
+    pub(crate) topics: Option<Vec<String>>,
+    pub(crate) semantic_tags: Option<Vec<String>>,
+    pub(crate) memory_type: Option<String>,
+    pub(crate) importance: Option<f64>,
+    pub(crate) is_duplicate_of: Option<String>,
+    pub(crate) is_global: Option<bool>,
 }
 
 pub struct IngestResult {
@@ -31,9 +33,11 @@ async fn extract_with_haiku(api: &HaikuClient, raw_note: &str) -> Option<HaikuEx
          - \"summary\": one line, max 20 words\n\
          - \"entities\": list of proper nouns and key technical terms\n\
          - \"topics\": category tags\n\
+         - \"semantic_tags\": 5-10 semantic keywords/synonyms for search (include related concepts, alternate phrasings, and broader/narrower terms)\n\
          - \"memory_type\": one of \"architecture\", \"decision\", \"pattern\", \"gotcha\", \"preference\", \"progress\"\n\
          - \"importance\": 0.0 to 1.0\n\
-         - \"is_duplicate_of\": null, or a summary of an existing memory this duplicates"
+         - \"is_duplicate_of\": null, or a summary of an existing memory this duplicates\n\
+         - \"is_global\": true if this is universal knowledge (user preferences, tool patterns) not specific to one project, false otherwise"
     );
 
     match api.complete(system, &user_msg).await {
@@ -77,17 +81,29 @@ pub fn store(
     extraction: Option<HaikuExtraction>,
     session_id: Option<&str>,
 ) -> Result<IngestResult, String> {
-    let (summary, entities, topics, memory_type, importance, is_dup) = match extraction {
-        Some(ext) => (
-            ext.summary,
-            ext.entities,
-            ext.topics,
-            ext.memory_type.unwrap_or_else(|| "progress".to_string()),
-            ext.importance.unwrap_or(0.5),
-            ext.is_duplicate_of,
-        ),
-        None => (None, None, None, "progress".to_string(), 0.5, None),
-    };
+    let (summary, entities, topics, semantic_tags, memory_type, importance, is_dup, is_global) =
+        match extraction {
+            Some(ext) => (
+                ext.summary,
+                ext.entities,
+                ext.topics,
+                ext.semantic_tags,
+                ext.memory_type.unwrap_or_else(|| "progress".to_string()),
+                ext.importance.unwrap_or(0.5),
+                ext.is_duplicate_of,
+                ext.is_global.unwrap_or(false),
+            ),
+            None => (
+                None,
+                None,
+                None,
+                None,
+                "progress".to_string(),
+                0.5,
+                None,
+                false,
+            ),
+        };
 
     // Check for duplicates via FTS + Jaccard
     let mut deduplicated = false;
@@ -128,10 +144,12 @@ pub fn store(
         summary,
         entities,
         topics,
+        semantic_tags,
         memory_type,
         importance,
         source_session: session_id.map(|s| s.to_string()),
         decay_at: None,
+        is_global,
     }
     .with_default_decay();
 
