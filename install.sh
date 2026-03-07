@@ -1,8 +1,7 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-# Install claude-remembers
-# Builds the Rust daemon and installs both binaries to ~/.local/bin
+# Install claude-memoryd — active memory MCP server for Claude Code
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 INSTALL_DIR="${INSTALL_DIR:-$HOME/.local/bin}"
@@ -12,24 +11,18 @@ echo ""
 
 # --- Prerequisites ---
 
-# Check for Rust
 if ! command -v cargo &>/dev/null; then
     echo "Error: Rust not found. Install it:"
     echo "  curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh"
     exit 1
 fi
 
-# Check for Claude Code
 if ! command -v claude &>/dev/null; then
-    echo "Error: Claude Code not found. Install it:"
-    echo "  npm install -g @anthropic-ai/claude-code"
-    echo ""
-    echo "Or if using the native binary:"
+    echo "Warning: Claude Code not found. Install it before using the MCP server."
     echo "  See https://docs.anthropic.com/en/docs/claude-code"
-    exit 1
+    echo ""
 fi
 
-echo "Found claude at: $(command -v claude)"
 echo "Found cargo at: $(command -v cargo)"
 echo ""
 
@@ -41,20 +34,12 @@ cargo build --release
 
 echo ""
 
-# --- Install ---
+# --- Install binary ---
 
 mkdir -p "$INSTALL_DIR"
 
-echo "Installing to $INSTALL_DIR..."
-
-# Install the daemon binary
 cp "$SCRIPT_DIR/target/release/claude-memoryd" "$INSTALL_DIR/claude-memoryd"
-echo "  Installed: claude-memoryd"
-
-# Install the wrapper script
-cp "$SCRIPT_DIR/scripts/claude-remembers" "$INSTALL_DIR/claude-remembers"
-chmod +x "$INSTALL_DIR/claude-remembers"
-echo "  Installed: claude-remembers"
+echo "Installed: $INSTALL_DIR/claude-memoryd"
 
 echo ""
 
@@ -69,27 +54,56 @@ if ! echo "$PATH" | grep -q "$INSTALL_DIR"; then
     echo ""
 fi
 
-# --- Verify ---
+# --- Register MCP server ---
 
+echo "Registering as Claude Code MCP server..."
+
+MEMORYD_BIN="$INSTALL_DIR/claude-memoryd"
+SETTINGS_FILE="$HOME/.claude/settings.json"
+mkdir -p "$HOME/.claude"
+
+if [ -f "$SETTINGS_FILE" ]; then
+    SETTINGS=$(cat "$SETTINGS_FILE")
+else
+    SETTINGS="{}"
+fi
+
+python3 -c "
+import json
+
+settings = json.loads('''$SETTINGS''')
+
+if 'mcpServers' not in settings:
+    settings['mcpServers'] = {}
+
+# Use a template — project and db are resolved at runtime via wrapper
+settings['mcpServers']['claude-memoryd'] = {
+    'command': '$MEMORYD_BIN',
+    'args': ['--project', '.', '--db', '.claude-memoryd/memory.db', '--mcp']
+}
+
+with open('$SETTINGS_FILE', 'w') as f:
+    json.dump(settings, f, indent=2)
+    f.write('\n')
+"
+
+echo "MCP server registered in $SETTINGS_FILE"
+
+echo ""
 echo "=== Installation complete ==="
 echo ""
-echo "Usage (drop-in replacement for claude):"
+echo "Claude Code will now have these memory tools available:"
+echo "  - memory_remember  Store a memory about the project"
+echo "  - memory_recall    Search past memories"
+echo "  - memory_context   Get full structured memory context"
+echo "  - memory_status    Check memory system stats"
 echo ""
-echo "  claude-remembers                              # interactive session"
-echo "  claude-remembers --dangerously-skip-permissions  # skip permissions"
-echo "  claude-remembers --resume                     # resume last session"
-echo "  claude-remembers -p \"explain this code\"       # non-interactive"
+echo "Add this to your project's CLAUDE.md for best results:"
 echo ""
-echo "All claude flags and arguments work exactly the same."
-echo ""
-echo "What's different:"
-echo "  - A background daemon (claude-memoryd) manages your project memory"
-echo "  - Memories are deduplicated, typed, and importance-ranked"
-echo "  - Context injected into MEMORY.md is compressed and organized"
-echo "  - Between sessions, memories are consolidated and cross-referenced"
+echo '  ## Memory'
+echo '  At the start of each session, call memory_context to load project memories.'
+echo '  When you learn something important about the project, call memory_remember.'
+echo '  Use memory_recall to search for relevant past knowledge.'
 echo ""
 echo "Set ANTHROPIC_API_KEY for Haiku-powered memory processing (~\$0.02/day)."
-echo "Without it, memories are stored but not processed (offline mode)."
-echo ""
-echo "Compatible with all existing Claude Code projects and settings."
-echo "Your CLAUDE.md, .claude/rules/, and settings are untouched."
+echo "Without it, memories are stored but not classified (offline mode)."

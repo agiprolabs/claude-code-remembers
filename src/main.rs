@@ -5,6 +5,7 @@ mod daemon;
 mod db;
 mod ingest;
 mod ipc;
+mod mcp;
 
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -27,9 +28,13 @@ struct Args {
     #[arg(long)]
     db: PathBuf,
 
-    /// Path to the Unix domain socket
+    /// Path to the Unix domain socket (ignored in MCP mode)
     #[arg(long)]
-    socket: PathBuf,
+    socket: Option<PathBuf>,
+
+    /// Run as MCP server over stdio instead of Unix socket
+    #[arg(long)]
+    mcp: bool,
 
     /// Idle timeout in seconds (default: 7200 = 2 hours)
     #[arg(long, default_value = "7200")]
@@ -42,8 +47,9 @@ struct Args {
 
 #[tokio::main]
 async fn main() {
-    // Initialize logging
+    // Initialize logging — stderr only (stdout is for MCP protocol)
     tracing_subscriber::fmt()
+        .with_writer(std::io::stderr)
         .with_env_filter(
             tracing_subscriber::EnvFilter::from_default_env()
                 .add_directive("claude_memoryd=info".parse().unwrap()),
@@ -52,13 +58,23 @@ async fn main() {
 
     let args = Args::parse();
 
+    // Resolve relative paths
+    let project = args.project.canonicalize().unwrap_or(args.project);
+    let db = if args.db.is_relative() {
+        std::env::current_dir()
+            .unwrap_or_default()
+            .join(&args.db)
+    } else {
+        args.db
+    };
+
     info!(
         "Starting claude-memoryd for project: {}",
-        args.project.display()
+        project.display()
     );
 
     // Ensure DB directory exists
-    if let Some(parent) = args.db.parent() {
+    if let Some(parent) = db.parent() {
         if let Err(e) = std::fs::create_dir_all(parent) {
             error!("Failed to create DB directory: {e}");
             std::process::exit(1);
@@ -66,7 +82,7 @@ async fn main() {
     }
 
     // Open database
-    let conn = match rusqlite::Connection::open(&args.db) {
+    let conn = match rusqlite::Connection::open(&db) {
         Ok(c) => c,
         Err(e) => {
             error!("Failed to open database: {e}");
@@ -93,13 +109,6 @@ async fn main() {
     };
 
     let state = Arc::new(DaemonState::new(conn, api));
-    let activity = Arc::new(Notify::new());
-
-    // Write pidfile
-    let pid_path = args.socket.with_extension("pid");
-    if let Err(e) = std::fs::write(&pid_path, std::process::id().to_string()) {
-        error!("Failed to write pidfile: {e}");
-    }
 
     // Spawn consolidation loop
     let consolidation_state = Arc::clone(&state);
@@ -138,36 +147,54 @@ async fn main() {
         }
     });
 
-    // Spawn idle timeout watcher
-    let idle_timeout = args.idle_timeout;
-    let idle_activity = Arc::clone(&activity);
-    let socket_path_for_cleanup = args.socket.clone();
-    let pid_path_for_cleanup = pid_path.clone();
-    tokio::spawn(async move {
-        loop {
-            let timeout = tokio::time::timeout(
-                std::time::Duration::from_secs(idle_timeout),
-                idle_activity.notified(),
-            )
-            .await;
+    if args.mcp {
+        // MCP mode: serve over stdio
+        info!("Running in MCP mode (stdio)");
+        mcp::server::serve_stdio(state).await;
+    } else {
+        // Socket mode: traditional Unix domain socket IPC
+        let socket = args.socket.unwrap_or_else(|| {
+            error!("--socket is required in socket mode (use --mcp for stdio)");
+            std::process::exit(1);
+        });
 
-            if timeout.is_err() {
-                info!("Idle timeout reached ({idle_timeout}s), shutting down");
-                // Cleanup socket and pidfile
-                let _ = std::fs::remove_file(&socket_path_for_cleanup);
-                let _ = std::fs::remove_file(&pid_path_for_cleanup);
-                std::process::exit(0);
-            }
+        let activity = Arc::new(Notify::new());
+
+        // Write pidfile
+        let pid_path = socket.with_extension("pid");
+        if let Err(e) = std::fs::write(&pid_path, std::process::id().to_string()) {
+            error!("Failed to write pidfile: {e}");
         }
-    });
 
-    // Start IPC server (blocks)
-    info!("Daemon ready, socket: {}", args.socket.display());
-    if let Err(e) = ipc::handler::serve(&args.socket, state, activity).await {
-        error!("IPC server error: {e}");
-        // Cleanup
-        let _ = std::fs::remove_file(&args.socket);
-        let _ = std::fs::remove_file(&pid_path);
-        std::process::exit(1);
+        // Spawn idle timeout watcher
+        let idle_timeout = args.idle_timeout;
+        let idle_activity = Arc::clone(&activity);
+        let socket_path_for_cleanup = socket.clone();
+        let pid_path_for_cleanup = pid_path.clone();
+        tokio::spawn(async move {
+            loop {
+                let timeout = tokio::time::timeout(
+                    std::time::Duration::from_secs(idle_timeout),
+                    idle_activity.notified(),
+                )
+                .await;
+
+                if timeout.is_err() {
+                    info!("Idle timeout reached ({idle_timeout}s), shutting down");
+                    let _ = std::fs::remove_file(&socket_path_for_cleanup);
+                    let _ = std::fs::remove_file(&pid_path_for_cleanup);
+                    std::process::exit(0);
+                }
+            }
+        });
+
+        // Start IPC server (blocks)
+        info!("Daemon ready, socket: {}", socket.display());
+        if let Err(e) = ipc::handler::serve(&socket, state, activity).await {
+            error!("IPC server error: {e}");
+            let _ = std::fs::remove_file(&socket);
+            let _ = std::fs::remove_file(&pid_path);
+            std::process::exit(1);
+        }
     }
 }
