@@ -1,142 +1,160 @@
 # claude-code-remembers
 
-Active memory daemon for Claude Code. Replaces the 200-line `MEMORY.md` with a SQLite-backed, Haiku-powered memory system that continuously ingests, deduplicates, consolidates, and serves compressed project knowledge.
-
-## The Problem
-
-Claude Code's auto-memory (`~/.claude/projects/<project>/memory/MEMORY.md`) is a flat file with a hard 200-line cap. No deduplication, no cross-referencing, no compression. Stale entries crowd out useful ones. Session 14's insight is never connected to session 3's architecture decision.
-
-## What This Does
-
-`claude-memoryd` is a background daemon that:
-
-- **Ingests** raw memory notes and uses Haiku to extract structured metadata (type, importance, entities, topics)
-- **Deduplicates** via FTS5 search + Jaccard similarity — the same fact won't be stored 5 times
-- **Consolidates** every 30 minutes — finds connections between memories, generates cross-cutting insights, merges duplicates, removes obsolete entries
-- **Serves** compressed, importance-ranked, type-organized context (~1,500 tokens) at session start
-- **Decays** stale memories — progress notes expire in 7 days, preferences in 90 days, architecture decisions persist forever
-
-All for ~$0.02/day in Haiku API costs.
-
-## Architecture
-
-```
-Claude Code Session ←→ Unix Socket IPC ←→ claude-memoryd ←→ SQLite + Haiku API
-```
-
-The daemon runs as a background process, persists between sessions (2-hour idle timeout), and communicates via a Unix domain socket with a JSON-line protocol.
-
-## Building
+Drop-in replacement for the `claude` command with active memory. Use `claude-remembers` exactly like `claude` — same flags, same projects, same config — but with a background daemon that makes Claude's memory actually work.
 
 ```bash
+# Instead of this:
+claude --dangerously-skip-permissions --resume
+
+# Use this:
+claude-remembers --dangerously-skip-permissions --resume
+```
+
+## What's different
+
+Claude Code's auto-memory (`MEMORY.md`) is a flat file with a 200-line cap. No deduplication, no compression, no processing. `claude-remembers` adds a background daemon that:
+
+- **Structures** memories by type (architecture, decision, pattern, gotcha, preference, progress)
+- **Deduplicates** via FTS5 search + Jaccard similarity
+- **Consolidates** every 30 minutes — finds connections, generates insights, merges duplicates
+- **Ranks** by importance and serves compressed context (~1,500 tokens, same budget)
+- **Decays** stale entries — progress fades in 7 days, architecture persists forever
+- **Uses Haiku** for cheap background processing (~$0.02/day)
+
+Your existing CLAUDE.md, `.claude/rules/`, settings, and projects are untouched.
+
+## Install
+
+### Prerequisites
+
+- [Claude Code](https://docs.anthropic.com/en/docs/claude-code) installed and working (`claude` command available)
+- [Rust](https://rustup.rs/) toolchain (`cargo`)
+- `ANTHROPIC_API_KEY` set in your environment (for Haiku-powered processing; works without it in offline mode)
+
+### One-line install
+
+```bash
+git clone https://github.com/agiprolabs/claude-code-remembers.git
+cd claude-code-remembers
+./install.sh
+```
+
+This builds the Rust daemon and installs two binaries to `~/.local/bin/`:
+- `claude-memoryd` — the background memory daemon
+- `claude-remembers` — the CLI wrapper
+
+### Manual install
+
+```bash
+git clone https://github.com/agiprolabs/claude-code-remembers.git
+cd claude-code-remembers
+
+# Build the daemon
 cargo build --release
-# Binary at target/release/claude-memoryd (~7MB)
+
+# Copy binaries to your PATH
+cp target/release/claude-memoryd ~/.local/bin/
+cp scripts/claude-remembers ~/.local/bin/
+chmod +x ~/.local/bin/claude-remembers
+
+# Make sure ~/.local/bin is in your PATH
+echo 'export PATH="$HOME/.local/bin:$PATH"' >> ~/.zshrc
+source ~/.zshrc
+```
+
+### Verify
+
+```bash
+claude-remembers --version
+# Should show the same version as `claude --version`
 ```
 
 ## Usage
 
-### Standalone (without Claude Code modification)
-
-#### 1. Start the daemon
+Use `claude-remembers` exactly like `claude`. All flags and arguments are passed through:
 
 ```bash
-# Set your API key for Haiku-powered extraction and consolidation
-export ANTHROPIC_API_KEY="sk-ant-..."
+# Interactive session
+claude-remembers
 
-# Start the daemon for a project
-claude-memoryd \
-  --project /path/to/your/project \
-  --db ~/.claude/projects/your-project/memory.db \
-  --socket ~/.claude/projects/your-project/memoryd.sock
+# Skip permissions
+claude-remembers --dangerously-skip-permissions
+
+# Resume last session
+claude-remembers --resume
+
+# Non-interactive
+claude-remembers -p "explain this function"
+
+# Combine flags
+claude-remembers --dangerously-skip-permissions --resume
+
+# With a specific model
+claude-remembers --model claude-sonnet-4-20250514
 ```
 
-The daemon runs in the foreground (use `&` or a process manager to background it). It will idle-timeout after 2 hours of no IPC activity.
+### Existing projects
 
-Without `ANTHROPIC_API_KEY`, it runs in **offline mode** — stores raw notes without Haiku processing, skips consolidation.
+`claude-remembers` is compatible with all existing Claude Code projects. It reads and writes the same `MEMORY.md` that Claude Code uses. The daemon runs alongside — it doesn't replace any files or settings.
 
-#### 2. Ingest a memory
+First time you run `claude-remembers` in a project that already has a `MEMORY.md`, the daemon will ingest those existing memories into its SQLite store. From then on, it serves compressed, organized context instead of raw notes.
+
+### Memory daemon management
+
+The daemon starts automatically when you run `claude-remembers` and idles out after 2 hours. You can also manage it manually:
 
 ```bash
-echo '{"method":"ingest","params":{"content":"The auth service uses JWT with RS256 and Redis for token blacklisting","session_id":"session-1"}}' \
-  | nc -U ~/.claude/projects/your-project/memoryd.sock
-```
-
-Response:
-```json
-{"status":"ok","data":{"memory_id":1,"deduplicated":false}}
-```
-
-#### 3. Get session context
-
-```bash
-echo '{"method":"get_context","params":{"max_tokens":1500}}' \
-  | nc -U ~/.claude/projects/your-project/memoryd.sock
-```
-
-Response:
-```json
-{"status":"ok","data":{"context":"# Project Memory\n\n## Architecture\n- Auth service uses JWT with RS256 and Redis for token blacklisting\n\n","token_estimate":25}}
-```
-
-#### 4. Check status
-
-```bash
-echo '{"method":"get_status","params":null}' \
-  | nc -U ~/.claude/projects/your-project/memoryd.sock
-```
-
-#### 5. Search memories
-
-```bash
-echo '{"method":"search","params":{"query":"auth JWT","limit":5}}' \
-  | nc -U ~/.claude/projects/your-project/memoryd.sock
-```
-
-### Using the helper script
-
-A convenience wrapper for common operations:
-
-```bash
-# Start daemon for current directory
-./scripts/memoryd.sh start
-
-# Ingest a note
-./scripts/memoryd.sh ingest "Redis cache TTL is set to 5 minutes for auth tokens"
-
-# Get context (what would be injected into Claude's system prompt)
-./scripts/memoryd.sh context
-
-# Check status
+# Check daemon status
 ./scripts/memoryd.sh status
 
-# Stop daemon
+# Manually ingest a memory
+./scripts/memoryd.sh ingest "The API uses rate limiting with a 100 req/min window"
+
+# Search memories
+./scripts/memoryd.sh search "rate limiting"
+
+# Get the context that would be injected
+./scripts/memoryd.sh context
+
+# Stop the daemon
 ./scripts/memoryd.sh stop
+
+# Migrate an existing MEMORY.md into the daemon
+./scripts/memoryd.sh migrate ~/.claude/projects/my-project/memory/MEMORY.md
 ```
 
-### Migrating existing MEMORY.md
+## How it works
 
-```bash
-# Pipe your existing MEMORY.md through the daemon
-while IFS= read -r line; do
-  [ -z "$line" ] && continue
-  echo "{\"method\":\"ingest\",\"params\":{\"content\":\"$line\"}}" \
-    | nc -U ~/.claude/projects/your-project/memoryd.sock
-done < ~/.claude/projects/your-project/memory/MEMORY.md
+```
+┌─────────────────────────────────────────────────────┐
+│                 claude-remembers                     │
+│                                                     │
+│  1. Start claude-memoryd (if not running)            │
+│  2. Query daemon → write compressed context          │
+│     to MEMORY.md                                    │
+│  3. Snapshot MEMORY.md                              │
+│  4. Run `claude` with all your arguments            │
+│  5. Diff MEMORY.md → ingest new entries into daemon  │
+└──────────────────┬──────────────────────────────────┘
+                   │
+        ┌──────────▼──────────┐
+        │   claude-memoryd     │
+        │                     │
+        │  SQLite + Haiku     │
+        │  Ingest → Dedup →   │
+        │  Consolidate →      │
+        │  Serve context      │
+        └─────────────────────┘
 ```
 
-## IPC Protocol
+The wrapper uses MEMORY.md as a sync point:
+- **Before session:** daemon writes organized context into MEMORY.md
+- **During session:** Claude reads MEMORY.md (as normal) and writes new entries to it
+- **After session:** wrapper diffs MEMORY.md against the pre-session snapshot, ingests new entries into the daemon
 
-JSON-line protocol over Unix domain socket. Send one JSON object per line, receive one JSON response per line.
+No Claude Code internals are modified.
 
-| Method | Params | Description |
-|--------|--------|-------------|
-| `ingest` | `{content, session_id?}` | Store a new memory note |
-| `get_context` | `{max_tokens, session_id?}` | Get compressed context for system prompt injection |
-| `get_status` | `null` | Memory counts, types, last consolidation time |
-| `search` | `{query, limit?}` | FTS5 full-text search |
-| `end_session` | `{session_id}` | Signal session end, triggers decay cleanup |
-
-## Memory Types
+## Memory types
 
 | Type | Decay | Examples |
 |------|-------|---------|
@@ -147,39 +165,48 @@ JSON-line protocol over Unix domain socket. Send one JSON object per line, recei
 | `preference` | 90 days | "User prefers snake_case, wants no emojis" |
 | `progress` | 7 days | "Finished implementing the auth middleware" |
 
-## Integration with Claude Code
+Haiku classifies each memory into a type and assigns an importance score (0.0–1.0). Without an API key, all memories default to `progress` with 0.5 importance.
 
-This daemon is designed to replace Claude Code's internal `MEMORY.md` system. Full integration requires modifying Claude Code's TypeScript source to:
+## Configuration
 
-1. Spawn `claude-memoryd` at session start
-2. Route memory writes through IPC instead of file writes
-3. Query the daemon for session context instead of reading `MEMORY.md`
+No configuration needed. The daemon inherits `ANTHROPIC_API_KEY` from your environment (the same key Claude Code uses).
 
-See [CLAUDE.md](./CLAUDE.md) for the full RFC with integration design, TypeScript code samples, and implementation phases.
+| Env var | Purpose |
+|---------|---------|
+| `ANTHROPIC_API_KEY` | Haiku API calls for memory processing (optional, degrades gracefully) |
+| `ANTHROPIC_BASE_URL` | Custom API endpoint (enterprise proxies, etc.) |
+| `CLAUDE_CODE_DISABLE_AUTO_MEMORY` | Set to `1` to disable (respects Claude Code's setting) |
 
-## Project Structure
+## Project structure
 
 ```
-src/
-├── main.rs                          # CLI, tokio runtime, daemon lifecycle
-├── daemon.rs                        # Shared state, IPC request handlers
-├── api/haiku.rs                     # Anthropic Messages API client (Haiku)
-├── db/
-│   ├── schema.rs                    # SQLite table creation + FTS5
-│   ├── memories.rs                  # Memory CRUD operations
-│   ├── consolidations.rs            # Consolidation insights CRUD
-│   └── fts.rs                       # Full-text search queries
-├── ingest/
-│   ├── pipeline.rs                  # Raw note → Haiku → structured memory
-│   └── dedup.rs                     # Jaccard similarity deduplication
-├── context/
-│   └── generator.rs                 # Build ranked, typed context from DB
-├── consolidate/
-│   ├── consolidation_loop.rs        # Background consolidation with Haiku
-│   └── decay.rs                     # Expiry cleanup
-└── ipc/
-    ├── protocol.rs                  # JSON message types
-    └── handler.rs                   # Unix socket server
+claude-code-remembers/
+├── install.sh                       # One-line installer
+├── scripts/
+│   ├── claude-remembers             # CLI wrapper (the main entry point)
+│   └── memoryd.sh                   # Daemon management helper
+├── src/
+│   ├── main.rs                      # Daemon CLI, tokio runtime, lifecycle
+│   ├── daemon.rs                    # Shared state, IPC request handlers
+│   ├── api/haiku.rs                 # Anthropic Messages API client
+│   ├── db/
+│   │   ├── schema.rs                # SQLite tables + FTS5
+│   │   ├── memories.rs              # Memory CRUD
+│   │   ├── consolidations.rs        # Consolidation insights CRUD
+│   │   └── fts.rs                   # Full-text search
+│   ├── ingest/
+│   │   ├── pipeline.rs              # Raw note → Haiku → structured memory
+│   │   └── dedup.rs                 # Jaccard similarity
+│   ├── context/
+│   │   └── generator.rs             # Build ranked, typed context
+│   ├── consolidate/
+│   │   ├── consolidation_loop.rs    # Background consolidation
+│   │   └── decay.rs                 # Expiry cleanup
+│   └── ipc/
+│       ├── protocol.rs              # JSON message types
+│       └── handler.rs               # Unix socket server
+├── Cargo.toml
+└── CLAUDE.md                        # Full RFC / design doc
 ```
 
 ## License

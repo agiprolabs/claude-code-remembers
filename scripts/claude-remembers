@@ -1,0 +1,271 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+# claude-remembers — drop-in replacement for `claude` with active memory
+#
+# How it works:
+#   1. Starts claude-memoryd daemon for the current project (if not running)
+#   2. Queries daemon for compressed context → writes to MEMORY.md
+#   3. Runs `claude` with all your arguments
+#   4. After session ends, scans MEMORY.md for new entries → ingests into daemon
+#
+# This is a shim layer — it doesn't modify Claude Code internals.
+# The daemon maintains the real memory store (SQLite). MEMORY.md becomes
+# a sync point: daemon writes context into it before each session,
+# and new entries written by Claude during the session get ingested back.
+
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+
+# --- Locate binaries ---
+
+# claude-memoryd: check next to this script, then PATH
+if [ -f "$SCRIPT_DIR/../target/release/claude-memoryd" ]; then
+    MEMORYD_BIN="$SCRIPT_DIR/../target/release/claude-memoryd"
+elif command -v claude-memoryd &>/dev/null; then
+    MEMORYD_BIN="$(command -v claude-memoryd)"
+else
+    echo "Error: claude-memoryd not found."
+    echo "Build it: cd $(dirname "$SCRIPT_DIR") && cargo build --release"
+    echo "Or add it to PATH."
+    exit 1
+fi
+
+# claude: find the real claude binary
+if command -v claude &>/dev/null; then
+    CLAUDE_BIN="$(command -v claude)"
+else
+    echo "Error: claude not found. Install Claude Code first:"
+    echo "  npm install -g @anthropic-ai/claude-code"
+    exit 1
+fi
+
+# --- Project paths ---
+
+PROJECT_DIR="$(pwd)"
+PROJECT_HASH=$(echo -n "$PROJECT_DIR" | shasum -a 256 | cut -c1-16)
+
+# Use Claude Code's actual memory directory structure
+# This finds the project's memory dir the same way Claude Code does
+CLAUDE_PROJECT_DIR="$HOME/.claude/projects"
+# Claude Code hashes the project path for its directory name
+# We need to find or create the right one
+find_claude_memory_dir() {
+    # Look for existing project dirs that might match
+    if [ -d "$CLAUDE_PROJECT_DIR" ]; then
+        for dir in "$CLAUDE_PROJECT_DIR"/*/; do
+            if [ -f "${dir}memory/MEMORY.md" ]; then
+                # Check if this dir's stored path matches our project
+                # Claude Code stores the path in the directory name with path separators replaced
+                local dirname
+                dirname=$(basename "$dir")
+                echo "$dir"
+                return
+            fi
+        done
+    fi
+    # Fallback: use the hash-based directory
+    local mem_dir="$CLAUDE_PROJECT_DIR/$PROJECT_HASH"
+    mkdir -p "$mem_dir/memory"
+    echo "$mem_dir/"
+}
+
+# Daemon state directory (separate from Claude's project dir)
+DAEMON_DIR="$HOME/.claude/memoryd/$PROJECT_HASH"
+DB_PATH="$DAEMON_DIR/memory.db"
+SOCK_PATH="$DAEMON_DIR/memoryd.sock"
+PID_PATH="$DAEMON_DIR/memoryd.sock.pid"
+
+# --- Daemon management ---
+
+daemon_is_running() {
+    if [ -f "$PID_PATH" ]; then
+        local pid
+        pid=$(cat "$PID_PATH")
+        if kill -0 "$pid" 2>/dev/null; then
+            return 0
+        fi
+        # Stale pidfile
+        rm -f "$PID_PATH" "$SOCK_PATH"
+    fi
+    return 1
+}
+
+start_daemon() {
+    mkdir -p "$DAEMON_DIR"
+
+    if daemon_is_running; then
+        return 0
+    fi
+
+    "$MEMORYD_BIN" \
+        --project "$PROJECT_DIR" \
+        --db "$DB_PATH" \
+        --socket "$SOCK_PATH" \
+        &>/dev/null &
+
+    # Wait for socket
+    local attempts=0
+    while [ $attempts -lt 40 ]; do
+        if [ -S "$SOCK_PATH" ]; then
+            return 0
+        fi
+        sleep 0.25
+        attempts=$((attempts + 1))
+    done
+
+    echo "Warning: claude-memoryd failed to start, running without active memory" >&2
+    return 1
+}
+
+send_ipc() {
+    local msg="$1"
+    echo "$msg" | nc -U "$SOCK_PATH" 2>/dev/null
+}
+
+# --- Memory sync ---
+
+# Find the actual MEMORY.md that Claude Code uses for this project
+find_memory_file() {
+    # Claude Code uses a specific path structure based on the working directory
+    # The path is: ~/.claude/projects/<hashed-path>/memory/MEMORY.md
+    # We search for it or create it
+
+    # First, check if there are any existing project dirs
+    if [ -d "$CLAUDE_PROJECT_DIR" ]; then
+        # Look for dirs containing our project path
+        for dir in "$CLAUDE_PROJECT_DIR"/*/; do
+            [ -d "$dir" ] || continue
+            if [ -f "${dir}memory/MEMORY.md" ]; then
+                # This might be our project's memory dir
+                echo "${dir}memory/MEMORY.md"
+                return
+            fi
+        done
+    fi
+
+    # If no existing memory found, we'll need to figure out Claude's path scheme
+    # Claude Code encodes the project path into the directory name
+    # Format: ~/.claude/projects/-path-segments-here/memory/MEMORY.md
+    local encoded_path
+    encoded_path=$(echo "$PROJECT_DIR" | sed 's|/|-|g' | sed 's|^-||')
+    local memory_file="$CLAUDE_PROJECT_DIR/$encoded_path/memory/MEMORY.md"
+    mkdir -p "$(dirname "$memory_file")"
+    echo "$memory_file"
+}
+
+inject_context() {
+    # Query daemon for compressed context and write to MEMORY.md
+    if ! daemon_is_running; then
+        return 1
+    fi
+
+    local memory_file
+    memory_file=$(find_memory_file)
+
+    local response
+    response=$(send_ipc '{"method":"get_context","params":{"max_tokens":1500}}')
+
+    if [ -z "$response" ]; then
+        return 1
+    fi
+
+    # Extract context from JSON response
+    local context
+    context=$(echo "$response" | python3 -c "
+import json, sys
+try:
+    r = json.load(sys.stdin)
+    if r.get('status') == 'ok':
+        print(r['data']['context'])
+except:
+    pass
+" 2>/dev/null)
+
+    if [ -n "$context" ]; then
+        echo "$context" > "$memory_file"
+    fi
+}
+
+snapshot_memory() {
+    # Take a snapshot of MEMORY.md before the session
+    local memory_file
+    memory_file=$(find_memory_file)
+
+    if [ -f "$memory_file" ]; then
+        cp "$memory_file" "$DAEMON_DIR/.memory_snapshot"
+    else
+        touch "$DAEMON_DIR/.memory_snapshot"
+    fi
+}
+
+ingest_new_entries() {
+    # After session: diff MEMORY.md against snapshot, ingest new lines
+    if ! daemon_is_running; then
+        return 0
+    fi
+
+    local memory_file
+    memory_file=$(find_memory_file)
+
+    if [ ! -f "$memory_file" ] || [ ! -f "$DAEMON_DIR/.memory_snapshot" ]; then
+        return 0
+    fi
+
+    # Find lines added during the session
+    local new_lines
+    new_lines=$(diff "$DAEMON_DIR/.memory_snapshot" "$memory_file" 2>/dev/null | grep "^> " | sed 's/^> //' || true)
+
+    if [ -z "$new_lines" ]; then
+        return 0
+    fi
+
+    local count=0
+    while IFS= read -r line; do
+        [ -z "$line" ] && continue
+        [[ "$line" =~ ^#.*$ ]] && continue
+        [[ "$line" =~ ^---$ ]] && continue
+        [[ "$line" =~ ^[[:space:]]*$ ]] && continue
+
+        local escaped
+        escaped=$(printf '%s' "$line" | python3 -c 'import json,sys; print(json.dumps(sys.stdin.read()))' 2>/dev/null)
+
+        send_ipc "{\"method\":\"ingest\",\"params\":{\"content\":${escaped}}}" >/dev/null 2>&1
+        count=$((count + 1))
+    done <<< "$new_lines"
+
+    if [ "$count" -gt 0 ]; then
+        # Signal session end for decay cleanup
+        send_ipc '{"method":"end_session","params":{"session_id":"'"$(date +%s)"'"}}' >/dev/null 2>&1
+    fi
+
+    rm -f "$DAEMON_DIR/.memory_snapshot"
+}
+
+# --- Main ---
+
+main() {
+    # Start daemon (silent, non-blocking)
+    local daemon_ok=false
+    if start_daemon; then
+        daemon_ok=true
+    fi
+
+    # Inject daemon context into MEMORY.md
+    if $daemon_ok; then
+        inject_context 2>/dev/null || true
+        snapshot_memory 2>/dev/null || true
+    fi
+
+    # Run claude with all arguments passed through
+    "$CLAUDE_BIN" "$@"
+    local exit_code=$?
+
+    # After session: ingest any new memory entries
+    if $daemon_ok; then
+        ingest_new_entries 2>/dev/null || true
+    fi
+
+    exit $exit_code
+}
+
+main "$@"
