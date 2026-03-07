@@ -448,6 +448,11 @@ Use the `claude-remember` MCP tools every session:
 - **Search**: Call `memory_recall` to find relevant memories by keyword/topic
 - **Rate**: Call `memory_feedback` after recall to mark memories helpful (true) or not (false)
 - **End**: Call `memory_session_end` with a summary of what was accomplished
+- **Browse**: Call `memory_list` to see all memories, optionally filter by type
+- **Edit**: Call `memory_update` to change a memory, `memory_delete` to remove one
+- **Maintain**: Call `memory_consolidate` to trigger consolidation, `memory_configure` to change settings
+- **Portable**: Call `memory_export` to backup, `memory_import` to restore
+- **Setup**: Call `memory_setup` to generate this snippet for new projects
 - **Check**: Call `memory_status` to view memory system health and stats"#;
 
         Response::ok(serde_json::json!({
