@@ -1,14 +1,14 @@
-# claude-code-remembers
+# claude-remember
 
 MCP server that gives Claude Code active, structured project memory. Replaces the flat 200-line `MEMORY.md` with a SQLite-backed daemon that deduplicates, classifies, consolidates, and serves compressed context.
 
 ```
-Claude Code ──MCP──▶ claude-memoryd (SQLite + Haiku)
-                       │
-                       ├─ memory_remember  → ingest + classify + dedup
-                       ├─ memory_recall    → FTS5 search
-                       ├─ memory_context   → compressed structured context
-                       └─ memory_status    → stats
+Claude Code --MCP--> claude-remember (SQLite + Haiku)
+                       |
+                       +-- memory_remember  -> ingest + classify + dedup
+                       +-- memory_recall    -> FTS5 search
+                       +-- memory_context   -> compressed structured context
+                       +-- memory_status    -> stats
 ```
 
 ## Install
@@ -33,7 +33,7 @@ This builds the daemon, installs it to `~/.local/bin/`, and registers it as an M
 
 ```bash
 cargo build --release
-cp target/release/claude-memoryd ~/.local/bin/
+cp target/release/claude-remember ~/.local/bin/
 
 # Register with Claude Code
 ./scripts/setup-mcp.sh
@@ -72,7 +72,7 @@ The daemon runs as an MCP server (stdio transport). Claude Code starts it automa
 ### Memory lifecycle
 
 1. **Ingest** — Claude calls `memory_remember` with an observation
-2. **Classify** — Haiku categorizes it (architecture/decision/pattern/gotcha/preference/progress) and scores importance 0.0–1.0
+2. **Classify** — Haiku categorizes it (architecture/decision/pattern/gotcha/preference/progress) and scores importance 0.0-1.0
 3. **Deduplicate** — FTS5 search + Jaccard similarity finds and replaces duplicates
 4. **Store** — SQLite with full-text search indexing
 5. **Consolidate** — Every 30 minutes, Haiku finds connections, generates insights, merges duplicates
@@ -105,35 +105,35 @@ Without an API key, memories are stored with default classification (`progress`,
 
 ```
 claude-code-remembers/
-├── install.sh                       # Build + install + register MCP
-├── scripts/
-│   ├── setup-mcp.sh                # Register MCP server with Claude Code
-│   ├── claude-remembers            # Shell wrapper (legacy, optional)
-│   └── memoryd.sh                  # Manual daemon management
-├── src/
-│   ├── main.rs                     # CLI, tokio runtime, MCP/socket mode
-│   ├── daemon.rs                   # Shared state, request handlers
-│   ├── mcp/
-│   │   └── server.rs              # MCP JSON-RPC server (stdio)
-│   ├── api/haiku.rs               # Anthropic Messages API client
-│   ├── db/
-│   │   ├── schema.rs              # SQLite tables + FTS5
-│   │   ├── memories.rs            # Memory CRUD
-│   │   ├── consolidations.rs      # Consolidation insights CRUD
-│   │   └── fts.rs                 # Full-text search
-│   ├── ingest/
-│   │   ├── pipeline.rs            # Raw note → Haiku → structured memory
-│   │   └── dedup.rs               # Jaccard similarity
-│   ├── context/
-│   │   └── generator.rs           # Build ranked, typed context
-│   ├── consolidate/
-│   │   ├── consolidation_loop.rs  # Background consolidation
-│   │   └── decay.rs               # Expiry cleanup
-│   └── ipc/
-│       ├── protocol.rs            # JSON message types
-│       └── handler.rs             # Unix socket server (legacy)
-├── Cargo.toml
-└── CLAUDE.md
++-- install.sh                       # Build + install + register MCP
++-- scripts/
+|   +-- setup-mcp.sh                # Register MCP server with Claude Code
+|   +-- claude-remembers            # Shell wrapper (legacy, optional)
+|   +-- remember.sh                 # Manual daemon management
++-- src/
+|   +-- main.rs                     # CLI, tokio runtime, MCP/socket mode
+|   +-- daemon.rs                   # Shared state, request handlers
+|   +-- mcp/
+|   |   +-- server.rs              # MCP JSON-RPC server (stdio)
+|   +-- api/haiku.rs               # Anthropic Messages API client
+|   +-- db/
+|   |   +-- schema.rs              # SQLite tables + FTS5
+|   |   +-- memories.rs            # Memory CRUD
+|   |   +-- consolidations.rs      # Consolidation insights CRUD
+|   |   +-- fts.rs                 # Full-text search
+|   +-- ingest/
+|   |   +-- pipeline.rs            # Raw note -> Haiku -> structured memory
+|   |   +-- dedup.rs               # Jaccard similarity
+|   +-- context/
+|   |   +-- generator.rs           # Build ranked, typed context
+|   +-- consolidate/
+|   |   +-- consolidation_loop.rs  # Background consolidation
+|   |   +-- decay.rs               # Expiry cleanup
+|   +-- ipc/
+|       +-- protocol.rs            # JSON message types
+|       +-- handler.rs             # Unix socket server (legacy)
++-- Cargo.toml
++-- CLAUDE.md
 ```
 
 ## License

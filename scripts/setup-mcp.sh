@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-# Setup claude-memoryd as an MCP server for Claude Code
+# Setup claude-remember as an MCP server for Claude Code
 # This registers the daemon in Claude Code's MCP settings and configures hooks.
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -9,16 +9,16 @@ PROJECT_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
 
 # --- Find binary ---
 
-if command -v claude-memoryd &>/dev/null; then
-    MEMORYD_BIN="$(command -v claude-memoryd)"
-elif [ -f "$PROJECT_ROOT/target/release/claude-memoryd" ]; then
-    MEMORYD_BIN="$PROJECT_ROOT/target/release/claude-memoryd"
+if command -v claude-remember &>/dev/null; then
+    REMEMBER_BIN="$(command -v claude-remember)"
+elif [ -f "$PROJECT_ROOT/target/release/claude-remember" ]; then
+    REMEMBER_BIN="$PROJECT_ROOT/target/release/claude-remember"
 else
-    echo "Error: claude-memoryd not found. Build first: cargo build --release"
+    echo "Error: claude-remember not found. Build first: cargo build --release"
     exit 1
 fi
 
-echo "Found claude-memoryd at: $MEMORYD_BIN"
+echo "Found claude-remember at: $REMEMBER_BIN"
 
 # --- Determine scope ---
 
@@ -40,7 +40,7 @@ mkdir -p "$SETTINGS_DIR"
 
 PROJECT_DIR="$(pwd)"
 ENCODED_PROJECT=$(echo "$PROJECT_DIR" | sed 's|[^a-zA-Z0-9]|-|g')
-DB_DIR="$HOME/.claude/projects/$ENCODED_PROJECT/memoryd"
+DB_DIR="$HOME/.claude/projects/$ENCODED_PROJECT/remember"
 DB_PATH="$DB_DIR/memory.db"
 mkdir -p "$DB_DIR"
 
@@ -61,8 +61,8 @@ settings = json.loads('''$SETTINGS''')
 if 'mcpServers' not in settings:
     settings['mcpServers'] = {}
 
-settings['mcpServers']['claude-memoryd'] = {
-    'command': '$MEMORYD_BIN',
+settings['mcpServers']['claude-remember'] = {
+    'command': '$REMEMBER_BIN',
     'args': [
         '--project', '$PROJECT_DIR',
         '--db', '$DB_PATH',
@@ -82,7 +82,7 @@ echo "MCP server registered in $SETTINGS_FILE"
 echo ""
 echo "=== Setup complete ==="
 echo ""
-echo "Claude Code will now start claude-memoryd as an MCP server."
+echo "Claude Code will now start claude-remember as an MCP server."
 echo "Available tools:"
 echo "  - memory_remember: Store a memory"
 echo "  - memory_recall:   Search memories"

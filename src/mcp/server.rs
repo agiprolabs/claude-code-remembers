@@ -209,7 +209,7 @@ async fn handle_mcp_request(
                     "resources": {}
                 },
                 "serverInfo": {
-                    "name": "claude-memoryd",
+                    "name": "claude-remember",
                     "version": env!("CARGO_PKG_VERSION")
                 }
             }))

@@ -1,5 +1,5 @@
 [package]
-name = "claude-memoryd"
+name = "claude-remember"
 version = "0.1.0"
 edition = "2021"
 description = "Active memory daemon for Claude Code"

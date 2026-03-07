@@ -18,7 +18,7 @@ use crate::consolidate::consolidation_loop;
 use crate::daemon::DaemonState;
 
 #[derive(Parser, Debug)]
-#[command(name = "claude-memoryd", about = "Active memory daemon for Claude Code")]
+#[command(name = "claude-remember", about = "Active memory daemon for Claude Code")]
 struct Args {
     /// Path to the project directory
     #[arg(long)]
@@ -52,7 +52,7 @@ async fn main() {
         .with_writer(std::io::stderr)
         .with_env_filter(
             tracing_subscriber::EnvFilter::from_default_env()
-                .add_directive("claude_memoryd=info".parse().unwrap()),
+                .add_directive("claude_remember=info".parse().unwrap()),
         )
         .init();
 
@@ -69,7 +69,7 @@ async fn main() {
     };
 
     info!(
-        "Starting claude-memoryd for project: {}",
+        "Starting claude-remember for project: {}",
         project.display()
     );
 

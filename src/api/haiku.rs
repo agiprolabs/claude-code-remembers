@@ -1,5 +1,5 @@
 use serde::{Deserialize, Serialize};
-use tracing::{error, warn};
+use tracing::{error, info, warn};
 
 #[derive(Debug, thiserror::Error)]
 pub enum ApiError {
@@ -13,9 +13,15 @@ pub enum ApiError {
     Parse(String),
 }
 
+#[derive(Debug, Clone)]
+enum AuthMethod {
+    ApiKey(String),
+    OAuthToken(String),
+}
+
 pub struct HaikuClient {
     http: reqwest::Client,
-    api_key: String,
+    auth: Option<AuthMethod>,
     base_url: String,
 }
 
@@ -47,37 +53,80 @@ struct ContentBlock {
 
 impl HaikuClient {
     pub fn from_env() -> Result<Self, ApiError> {
-        let api_key = std::env::var("ANTHROPIC_API_KEY")
-            .or_else(|_| std::env::var("CLAUDE_CODE_API_KEY"))
-            .map_err(|_| ApiError::NoCredentials)?;
-
         let base_url = std::env::var("ANTHROPIC_BASE_URL")
             .unwrap_or_else(|_| "https://api.anthropic.com".to_string());
 
-        Ok(Self {
-            http: reqwest::Client::new(),
-            api_key,
-            base_url,
-        })
+        // Try API key first
+        if let Ok(api_key) = std::env::var("ANTHROPIC_API_KEY")
+            .or_else(|_| std::env::var("CLAUDE_CODE_API_KEY"))
+        {
+            info!("Using API key authentication");
+            return Ok(Self {
+                http: reqwest::Client::new(),
+                auth: Some(AuthMethod::ApiKey(api_key)),
+                base_url,
+            });
+        }
+
+        // Try OAuth token from macOS keychain
+        if let Some(token) = Self::read_oauth_from_keychain() {
+            info!("Using OAuth token from keychain");
+            return Ok(Self {
+                http: reqwest::Client::new(),
+                auth: Some(AuthMethod::OAuthToken(token)),
+                base_url,
+            });
+        }
+
+        Err(ApiError::NoCredentials)
+    }
+
+    #[cfg(target_os = "macos")]
+    fn read_oauth_from_keychain() -> Option<String> {
+        let output = std::process::Command::new("security")
+            .args(["find-generic-password", "-s", "Claude Code-credentials", "-w"])
+            .output()
+            .ok()?;
+
+        if !output.status.success() {
+            return None;
+        }
+
+        let json_str = String::from_utf8(output.stdout).ok()?.trim().to_string();
+        let parsed: serde_json::Value = serde_json::from_str(&json_str).ok()?;
+        let token = parsed
+            .get("claudeAiOauth")?
+            .get("accessToken")?
+            .as_str()?
+            .to_string();
+
+        if token.is_empty() {
+            None
+        } else {
+            Some(token)
+        }
+    }
+
+    #[cfg(not(target_os = "macos"))]
+    fn read_oauth_from_keychain() -> Option<String> {
+        None
     }
 
     /// Create a client that always fails (for offline/no-credentials mode).
     pub fn unavailable() -> Self {
         Self {
             http: reqwest::Client::new(),
-            api_key: String::new(),
+            auth: None,
             base_url: String::new(),
         }
     }
 
     pub fn is_available(&self) -> bool {
-        !self.api_key.is_empty()
+        self.auth.is_some()
     }
 
     pub async fn complete(&self, system: &str, user_msg: &str) -> Result<String, ApiError> {
-        if !self.is_available() {
-            return Err(ApiError::NoCredentials);
-        }
+        let auth = self.auth.as_ref().ok_or(ApiError::NoCredentials)?;
 
         let request = ApiRequest {
             model: "claude-haiku-4-5-20251001".to_string(),
@@ -93,15 +142,20 @@ impl HaikuClient {
         let max_retries = 3;
 
         loop {
-            let resp = self
+            let mut req_builder = self
                 .http
                 .post(format!("{}/v1/messages", self.base_url))
-                .header("x-api-key", &self.api_key)
                 .header("anthropic-version", "2023-06-01")
-                .header("content-type", "application/json")
-                .json(&request)
-                .send()
-                .await?;
+                .header("content-type", "application/json");
+
+            req_builder = match auth {
+                AuthMethod::ApiKey(key) => req_builder.header("x-api-key", key),
+                AuthMethod::OAuthToken(token) => {
+                    req_builder.header("Authorization", format!("Bearer {token}"))
+                }
+            };
+
+            let resp = req_builder.json(&request).send().await?;
 
             let status = resp.status().as_u16();
 

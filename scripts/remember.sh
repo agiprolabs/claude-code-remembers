@@ -1,22 +1,22 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-# Helper script for claude-memoryd
-# Usage: memoryd.sh <command> [args]
+# Helper script for claude-remember
+# Usage: remember.sh <command> [args]
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-BINARY="${SCRIPT_DIR}/../target/release/claude-memoryd"
-PROJECT_DIR="${MEMORYD_PROJECT:-$(pwd)}"
+BINARY="${SCRIPT_DIR}/../target/release/claude-remember"
+PROJECT_DIR="${REMEMBER_PROJECT:-$(pwd)}"
 
 # Derive a safe directory name from the project path
 PROJECT_HASH=$(echo -n "$PROJECT_DIR" | shasum -a 256 | cut -c1-16)
-MEMORYD_DIR="${HOME}/.claude/memoryd/${PROJECT_HASH}"
-DB_PATH="${MEMORYD_DIR}/memory.db"
-SOCK_PATH="${MEMORYD_DIR}/memoryd.sock"
-PID_PATH="${MEMORYD_DIR}/memoryd.sock.pid"
+REMEMBER_DIR="${HOME}/.claude/remember/${PROJECT_HASH}"
+DB_PATH="${REMEMBER_DIR}/memory.db"
+SOCK_PATH="${REMEMBER_DIR}/remember.sock"
+PID_PATH="${REMEMBER_DIR}/remember.sock.pid"
 
 ensure_dir() {
-    mkdir -p "$MEMORYD_DIR"
+    mkdir -p "$REMEMBER_DIR"
 }
 
 is_running() {
@@ -44,7 +44,7 @@ cmd_start() {
         exit 1
     fi
 
-    echo "Starting claude-memoryd for: $PROJECT_DIR"
+    echo "Starting claude-remember for: $PROJECT_DIR"
     "$BINARY" \
         --project "$PROJECT_DIR" \
         --db "$DB_PATH" \
@@ -183,6 +183,6 @@ case "${1:-help}" in
         echo ""
         echo "Environment:"
         echo "  ANTHROPIC_API_KEY  Required for Haiku-powered extraction/consolidation"
-        echo "  MEMORYD_PROJECT    Override project directory (default: pwd)"
+        echo "  REMEMBER_PROJECT   Override project directory (default: pwd)"
         ;;
 esac

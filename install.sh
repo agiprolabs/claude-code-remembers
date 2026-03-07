@@ -1,12 +1,12 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-# Install claude-memoryd — active memory MCP server for Claude Code
+# Install claude-remember — active memory MCP server for Claude Code
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 INSTALL_DIR="${INSTALL_DIR:-$HOME/.local/bin}"
 
-echo "=== claude-code-remembers installer ==="
+echo "=== claude-remember installer ==="
 echo ""
 
 # --- Prerequisites ---
@@ -28,7 +28,7 @@ echo ""
 
 # --- Build ---
 
-echo "Building claude-memoryd (release mode)..."
+echo "Building claude-remember (release mode)..."
 cd "$SCRIPT_DIR"
 cargo build --release
 
@@ -38,8 +38,8 @@ echo ""
 
 mkdir -p "$INSTALL_DIR"
 
-cp "$SCRIPT_DIR/target/release/claude-memoryd" "$INSTALL_DIR/claude-memoryd"
-echo "Installed: $INSTALL_DIR/claude-memoryd"
+cp "$SCRIPT_DIR/target/release/claude-remember" "$INSTALL_DIR/claude-remember"
+echo "Installed: $INSTALL_DIR/claude-remember"
 
 echo ""
 
@@ -58,7 +58,7 @@ fi
 
 echo "Registering as Claude Code MCP server..."
 
-MEMORYD_BIN="$INSTALL_DIR/claude-memoryd"
+REMEMBER_BIN="$INSTALL_DIR/claude-remember"
 SETTINGS_FILE="$HOME/.claude/settings.json"
 mkdir -p "$HOME/.claude"
 
@@ -76,10 +76,9 @@ settings = json.loads('''$SETTINGS''')
 if 'mcpServers' not in settings:
     settings['mcpServers'] = {}
 
-# Use a template — project and db are resolved at runtime via wrapper
-settings['mcpServers']['claude-memoryd'] = {
-    'command': '$MEMORYD_BIN',
-    'args': ['--project', '.', '--db', '.claude-memoryd/memory.db', '--mcp']
+settings['mcpServers']['claude-remember'] = {
+    'command': '$REMEMBER_BIN',
+    'args': ['--project', '.', '--db', '.claude-remember/memory.db', '--mcp']
 }
 
 with open('$SETTINGS_FILE', 'w') as f:
