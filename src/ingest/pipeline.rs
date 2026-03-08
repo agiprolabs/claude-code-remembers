@@ -107,23 +107,40 @@ pub fn store(
 
     // Check for duplicates via FTS + Jaccard
     let mut deduplicated = false;
-    if let Some(ref summary_text) = summary {
-        if let Ok(candidates) = fts::search_summaries(conn, summary_text, 5) {
-            for (existing_id, existing_summary) in &candidates {
-                let sim = dedup::jaccard_similarity(summary_text, existing_summary);
-                if sim > dedup::DEDUP_THRESHOLD {
-                    info!(
-                        "Dedup: new memory similar to #{existing_id} (similarity: {sim:.2}), replacing"
-                    );
-                    let _ = memories::delete_by_id(conn, *existing_id);
-                    deduplicated = true;
-                    break;
-                }
+    let search_text = summary.as_deref().unwrap_or(raw_note);
+
+    // First: check for exact content match (catches repeated ingests without Haiku)
+    let exact_exists: bool = conn
+        .query_row(
+            "SELECT count(*) > 0 FROM memories WHERE content = ?1",
+            rusqlite::params![raw_note],
+            |row| row.get(0),
+        )
+        .unwrap_or(false);
+
+    if exact_exists {
+        return Ok(IngestResult {
+            memory_id: -1,
+            deduplicated: true,
+        });
+    }
+
+    // Second: FTS + Jaccard similarity on summary (or raw content as fallback)
+    if let Ok(candidates) = fts::search_summaries(conn, search_text, 5) {
+        for (existing_id, existing_summary) in &candidates {
+            let sim = dedup::jaccard_similarity(search_text, existing_summary);
+            if sim > dedup::DEDUP_THRESHOLD {
+                info!(
+                    "Dedup: new memory similar to #{existing_id} (similarity: {sim:.2}), replacing"
+                );
+                let _ = memories::delete_by_id(conn, *existing_id);
+                deduplicated = true;
+                break;
             }
         }
     }
 
-    // Also check if Haiku flagged it as a duplicate
+    // Third: check if Haiku flagged it as a duplicate
     if is_dup.is_some() && !deduplicated {
         if let Some(ref dup_summary) = is_dup {
             if let Ok(candidates) = fts::search_summaries(conn, dup_summary, 3) {

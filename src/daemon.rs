@@ -41,17 +41,17 @@ impl DaemonState {
             .unwrap_or(false);
 
         // Phase 2: DB storage (sync, short lock)
-        let conn = self.db.lock().unwrap();
-        match pipeline::store(&conn, &params.content, extraction, params.session_id.as_deref()) {
+        let result = {
+            let conn = self.db.lock().unwrap();
+            pipeline::store(&conn, &params.content, extraction, params.session_id.as_deref())
+        };
+        // Project DB lock dropped here
+
+        match result {
             Ok(result) => {
-                // Also store in global DB if flagged global
-                if is_global {
-                    if let Some(ref global_db) = self.global_db {
-                        let gconn = global_db.lock().unwrap();
-                        // Re-store without extraction (already stored in project DB, just copy)
-                        let _ = pipeline::store(&gconn, &params.content, None, params.session_id.as_deref());
-                    }
-                }
+                // Global sync happens during consolidation — no need to double-store here.
+                // The sync_global_memories function handles project → global propagation.
+                let _ = is_global; // Flag is stored in the memory record for sync to pick up
                 Response::ok(IngestResult {
                     memory_id: result.memory_id,
                     deduplicated: result.deduplicated,
@@ -381,11 +381,11 @@ impl DaemonState {
         // Export is_global memories from project → global
         if let Ok(project_globals) = memories::get_global(&project_conn, 100) {
             for mem in &project_globals {
-                // Check if already in global DB by content similarity
+                // Check by content (not summary — summary can be NULL)
                 let exists: bool = global_conn
                     .query_row(
-                        "SELECT count(*) > 0 FROM memories WHERE summary = ?1",
-                        rusqlite::params![mem.summary],
+                        "SELECT count(*) > 0 FROM memories WHERE content = ?1",
+                        rusqlite::params![mem.content],
                         |row| row.get(0),
                     )
                     .unwrap_or(true);
@@ -413,8 +413,8 @@ impl DaemonState {
             for mem in &all_global {
                 let exists: bool = project_conn
                     .query_row(
-                        "SELECT count(*) > 0 FROM memories WHERE summary = ?1 AND is_global = 1",
-                        rusqlite::params![mem.summary],
+                        "SELECT count(*) > 0 FROM memories WHERE content = ?1 AND is_global = 1",
+                        rusqlite::params![mem.content],
                         |row| row.get(0),
                     )
                     .unwrap_or(true);
